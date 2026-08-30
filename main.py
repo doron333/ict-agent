@@ -32,6 +32,7 @@ Env:
 """
 
 import json
+import json as _json
 import os
 import sys
 import time
@@ -41,6 +42,8 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import requests
+
+from redis_coordinator import aggregator
 
 NY = ZoneInfo("America/New_York")
 API = "https://api.exchange.coinbase.com"
@@ -715,7 +718,7 @@ class Engine:
 
 # ------------------------------ NOTIFY ------------------------------
 
-def send_telegram(text):
+def _send_telegram_direct(text):
     if not BOT or not CHAT:
         print("[DRY-RUN telegram]\n" + text + "\n")
         return
@@ -725,6 +728,39 @@ def send_telegram(text):
                             "disable_web_page_preview": True}, timeout=15).raise_for_status()
     except Exception as e:
         print(f"telegram send failed: {e}")
+
+
+def send_telegram(text, signal=None):
+    """
+    Coordinates Telegram delivery across all replicas.
+
+    - If a `signal` dict (a raw trading event) is provided and Redis is
+      available: non-lead replicas queue the signal for aggregation instead
+      of sending it, while the lead replica (worker-0) queues its own signal
+      and then attempts to collect + send the once-per-minute batch message.
+    - If no Redis is configured, falls back to sending directly.
+    - Non-signal messages (startup/error notices) are only sent by the lead
+      replica once Redis coordination is active, to avoid 42x duplicate
+      broadcasts; otherwise every replica sends directly as before.
+    """
+    if aggregator.r:
+        if signal is not None:
+            tagged = dict(signal)
+            tagged["_agent_id"] = aggregator.agent_id
+            aggregator.queue_signal(_json.dumps(tagged))
+
+            if aggregator.is_lead():
+                batch_msg = aggregator.collect_batch()
+                if batch_msg:
+                    _send_telegram_direct(batch_msg)
+            return
+        else:
+            if not aggregator.is_lead():
+                return
+            _send_telegram_direct(text)
+            return
+
+    _send_telegram_direct(text)
 
 
 def fmt_event(p):
@@ -801,14 +837,14 @@ def process(product, tf, sent, announced, live_window_s):
         fresh = now - p["bar_time"] <= live_window_s
         if p["event"] == "setup" and notifiable(p, announced):
             if fresh and key not in sent:
-                send_telegram(fmt_event(p))
+                send_telegram(fmt_event(p), signal=p)
                 announced.add(p["sid"])
             elif not fresh:
                 announced.add(p["sid"])
             sent.add(key)
         elif p["event"] != "setup" and notifiable(p, announced):
             if fresh and key not in sent:
-                send_telegram(fmt_event(p))
+                send_telegram(fmt_event(p), signal=p)
             sent.add(key)
         else:
             sent.add(key)
