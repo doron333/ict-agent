@@ -42,6 +42,14 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from ledger import Ledger
+from context_agent import ContextAgent
+from macro_agent import MacroAgent
+from risk_agent import RiskAgent
+from review_agent import ReviewAgent
+import commands as cmds
+from team import Team
+
 NY = ZoneInfo("America/New_York")
 API = "https://api.exchange.coinbase.com"
 UA = {"User-Agent": "ict-confluence-agent/2.0"}
@@ -95,8 +103,10 @@ SIGNAL_TFS = [t.strip() for t in os.environ.get("SIGNAL_TFS", "1m,5m,15m,1h,6h,1
               if t.strip() in TF_MATRIX]
 BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
-STATE_FILE = os.environ.get("STATE_FILE", "state.json")
+DATA_DIR = os.environ.get("DATA_DIR") or ("/data" if os.path.isdir("/data") else ".")
+STATE_FILE = os.environ.get("STATE_FILE", os.path.join(DATA_DIR, "state.json"))
 GRADE_RANK = {"A": 3, "B": 2, "C": 1}
+TEAM = None
 
 
 def min_grade_for(tf: str) -> str:
@@ -801,14 +811,14 @@ def process(product, tf, sent, announced, live_window_s):
         fresh = now - p["bar_time"] <= live_window_s
         if p["event"] == "setup" and notifiable(p, announced):
             if fresh and key not in sent:
-                send_telegram(fmt_event(p))
+                TEAM.handle_setup(p)
                 announced.add(p["sid"])
             elif not fresh:
                 announced.add(p["sid"])
             sent.add(key)
         elif p["event"] != "setup" and notifiable(p, announced):
-            if fresh and key not in sent:
-                send_telegram(fmt_event(p))
+            if key not in sent:
+                TEAM.on_outcome(p, fresh)
             sent.add(key)
         else:
             sent.add(key)
@@ -818,6 +828,7 @@ def process(product, tf, sent, announced, live_window_s):
     bias = {1: "BULL", -1: "BEAR", 0: "NEUT"}[eng.htf_bias[-1]]
     print(f"[{datetime.now(timezone.utc):%H:%M:%S}] {product} {tf}: c={eng.bars[-1].c:.2f} "
           f"bias={bias} {st} pools {len(eng.pools_hi)}/{len(eng.pools_lo)}")
+    TEAM.live[(product, tf)] = {"close": eng.bars[-1].c, "bias": bias, "state": st, "ts": now}
 
 
 def main():
@@ -839,6 +850,17 @@ def main():
                     if p["event"] == "setup":
                         print(f"                {p['layers']}")
         return
+    global TEAM
+    ledger = Ledger(DATA_DIR, partial_r=BASE_CFG["partial_r"] if BASE_CFG["use_partial"] else 0.0)
+    tuned = ledger.applied_weights() or {}
+    for lk, lw in tuned.items():
+        if lk in BASE_CFG and isinstance(BASE_CFG[lk], tuple):
+            BASE_CFG[lk] = (BASE_CFG[lk][0], float(lw))
+    TEAM = Team(ledger, ContextAgent(), MacroAgent(os.environ.get("MACRO_MODE", "warn")),
+                RiskAgent(ledger), ReviewAgent(), BASE_CFG, send_telegram, fmt_event)
+    TEAM.context.maybe_refresh(force=True)
+    TEAM.macro.maybe_refresh(force=True)
+    cmds.start(TEAM, send_telegram, BOT, CHAT)
     sent, announced = load_state()
     last_done = {}
     first = True
@@ -857,11 +879,16 @@ def main():
                             live_window_s=0 if first else 2 * sec + 120)
                     last_done[(product, tf)] = completed
             if first:
-                send_telegram("\U0001F7E2 ICT agent online — " + ", ".join(PRODUCTS)
-                              + " · TFs: " + ", ".join(SIGNAL_TFS)
-                              + f" · min grade {MIN_GRADE}")
+                roster = ["signal x" + str(len(SIGNAL_TFS)), "risk", "context", "macro", "learning"]
+                if TEAM.review.enabled():
+                    roster.append("review(" + TEAM.review.model + ")")
+                send_telegram("\U0001F7E2 ICT <b>team</b> online — " + ", ".join(PRODUCTS)
+                              + " · TFs: " + ", ".join(SIGNAL_TFS) + f" · min grade {MIN_GRADE}"
+                              + "\nAgents: " + ", ".join(roster)
+                              + "\nText <b>help</b> for commands · ledger @ " + DATA_DIR)
                 first = False
             save_state(sent, announced)
+            TEAM.tick()
             fails = 0
         except Exception:
             fails += 1
