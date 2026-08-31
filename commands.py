@@ -8,6 +8,7 @@ import learning_agent as learning
 
 HELP = ("🤖 <b>Team commands</b> (just text the word):\n"
         "status — engines, bias, open setups, day R\n"
+        "test — fire a sample of every alert type\n"
         "scorecard — full performance report\n"
         "context — market snapshot (funding, OI, F&G)\n"
         "events — upcoming macro calendar\n"
@@ -34,6 +35,9 @@ def _loop(team, send, bot, chat):
         try:
             r = requests.get(f"https://api.telegram.org/bot{bot}/getUpdates",
                              params={"offset": offset + 1, "timeout": 45}, timeout=55).json()
+            if not r.get("ok"):
+                time.sleep(20)
+                continue
             for u in r.get("result", []):
                 offset = u["update_id"]
                 team.ledger.meta_set("tg_offset", str(offset))
@@ -60,6 +64,8 @@ def dispatch(team, txt):
         return HELP
     if t == "status":
         return team.status_text()
+    if t == "test":
+        return _test_sequence(team)
     if t == "scorecard":
         return learning.scorecard(L)
     if t == "context":
@@ -108,3 +114,40 @@ def dispatch(team, txt):
         L.set_note(rid, note)
         return f"✍️ Note saved on {tag}"
     return "Didn't catch that — text <b>help</b> for the command list."
+
+
+def _test_sequence(team):
+    """Send one sample of every message type through the live pipeline. No ledger writes."""
+    now = int(time.time())
+    p = {"event": "setup", "product": "ETH-USD", "tf": "15m", "side": "long", "grade": "A",
+         "align": 87, "entry": 2412.50, "stop": 2404.30, "target": 2465.80, "rr": 6.5,
+         "bar_time": now, "sid": "test",
+         "layers": "EMA\u2713 HTF\u2713 RSI\u2717 MAC\u2713 VOL\u2713 DSP\u2713 VWP\u2713 "
+                   "SMT\u2713 ATR\u2713 EQ\u2713 KZ\u2717 RR\u2713 PD\u2713"}
+    team.context.maybe_refresh()
+    team.macro.maybe_refresh()
+    _, mline = team.macro.check()
+    team.send("🧪 <b>TEST</b> — one sample of every alert type. Live market context, fake trade. "
+              "Sample tickets say #0; real ones get real numbers.")
+    time.sleep(1.1)
+    lines = [team.fmt_event(p), "🎫 <b>#0</b> (sample) — you'd reply <code>took 0 2412.8</code>"]
+    lines += team.context.lines(p["product"], p["side"])
+    if mline:
+        lines.append(mline)
+    lines.append("🛡 day +0.0R · 0 open")
+    team.send("\n".join(lines))
+    for ev, extra in (("filled", {}), ("tp1", {"result": "partial +1.0R banked"}),
+                      ("be", {"result": "stop moved to break-even"}),
+                      ("closed", {"result": "target +6.5R"})):
+        time.sleep(1.1)
+        team.send(team.fmt_event({**p, "event": ev, **extra}))
+    time.sleep(1.1)
+    team.send("⛔ <b>#0 gated</b> — 2-loss streak — only A grades until a winner resets it\n"
+              "(ETH-USD 15m short B, 58% · still tracked as a ghost)")
+    time.sleep(1.1)
+    team.send("👻 <i>(gated — ghost track)</i>\n" +
+              team.fmt_event({**p, "event": "filled", "side": "short", "grade": "B", "align": 58}))
+    time.sleep(1.1)
+    return ("🧪 <b>TEST DONE</b> — that was: setup ticket, filled, TP1, break-even, closed, "
+            "risk gate, ghost. On schedule you'll also get 🗓 heads-ups, the 🌙 nightly debrief, "
+            "and the 🗞 Sunday scorecard.")
