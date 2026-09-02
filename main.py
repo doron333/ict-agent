@@ -20,6 +20,9 @@ Deploy:  Railway worker. `python -u main.py`
 Test:    python main.py --backtest            (recent signals per TF)
          python main.py --once                (single live cycle)
 
+NQ:      `NQ_ENABLED=1` runs the NQ futures agent (nq_agent/) inside this worker;
+         `python main.py --instrument nq` runs it alone. See README "NQ agent".
+
 Env:
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID    (without them: dry-run prints)
   PRODUCTS        default "ETH-USD"        e.g. "ETH-USD,BTC-USD"
@@ -104,6 +107,7 @@ SIGNAL_TFS = [t.strip() for t in os.environ.get("SIGNAL_TFS", "1m,5m,15m,1h,6h,1
 BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR") or ("/data" if os.path.isdir("/data") else ".")
+NQ_ENABLED = os.environ.get("NQ_ENABLED", "0") not in ("0", "", "false", "no")
 STATE_FILE = os.environ.get("STATE_FILE", os.path.join(DATA_DIR, "state.json"))
 GRADE_RANK = {"A": 3, "B": 2, "C": 1}
 TEAM = None
@@ -833,6 +837,14 @@ def process(product, tf, sent, announced, live_window_s):
 
 def main():
     args = sys.argv[1:]
+    if "--instrument" in args:
+        inst = args[args.index("--instrument") + 1].lower() if args.index("--instrument") + 1 < len(args) else ""
+        if inst == "nq":
+            from nq_agent.main import run_standalone
+            run_standalone(once="--once" in args)
+            return
+        if inst not in ("crypto", "eth", "btc"):
+            sys.exit(f"unknown --instrument {inst!r} (nq | crypto)")
     if "--backtest" in args:
         for product in PRODUCTS:
             for tf in SIGNAL_TFS:
@@ -861,6 +873,9 @@ def main():
     TEAM.context.maybe_refresh(force=True)
     TEAM.macro.maybe_refresh(force=True)
     cmds.start(TEAM, send_telegram, BOT, CHAT)
+    if NQ_ENABLED:
+        from nq_agent.main import start_in_thread
+        start_in_thread(TEAM, send_telegram, DATA_DIR)   # posts its own "🟩 NQ agent online"
     sent, announced = load_state()
     last_done = {}
     first = True
@@ -882,6 +897,8 @@ def main():
                 roster = ["signal x" + str(len(SIGNAL_TFS)), "risk", "context", "macro", "learning"]
                 if TEAM.review.enabled():
                     roster.append("review(" + TEAM.review.model + ")")
+                if NQ_ENABLED:
+                    roster.append("nq")
                 send_telegram("\U0001F7E2 ICT <b>team</b> online — " + ", ".join(PRODUCTS)
                               + " · TFs: " + ", ".join(SIGNAL_TFS) + f" · min grade {MIN_GRADE}"
                               + "\nAgents: " + ", ".join(roster)

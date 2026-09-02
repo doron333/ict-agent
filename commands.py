@@ -5,6 +5,7 @@ import time
 import requests
 
 import learning_agent as learning
+from nq_agent import commands as nq_cmds
 
 HELP = ("🤖 <b>Team commands</b> (just text the word):\n"
         "status — engines, bias, open setups, day R\n"
@@ -19,6 +20,7 @@ HELP = ("🤖 <b>Team commands</b> (just text the word):\n"
         "skip <id> — mark that you passed\n"
         "note <id> <text> — attach a note\n"
         "pause / resume — mute new setup alerts (tracking continues)\n"
+        "nq status|levels|bias|pause|resume|stats [days] — NQ futures agent (nq help)\n"
         "help — this list")
 
 
@@ -62,6 +64,8 @@ def dispatch(team, txt):
     L = team.ledger
     if t in ("help", "start", "commands"):
         return HELP
+    if nq_cmds.is_nq(t):
+        return nq_cmds.dispatch(getattr(team, "nq", None), t)
     if t == "status":
         return team.status_text()
     if t == "test":

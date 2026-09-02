@@ -20,6 +20,7 @@ class Team:
         self.fmt_event = fmt_event
         self.live = {}          # (product, tf) -> engine snapshot for `status`
         self._pre_sent = set()
+        self.nq = None          # nq_agent.main.NQAgent when NQ_ENABLED=1 (or standalone)
 
     def paused(self):
         return self.ledger.meta_get("paused") == "1"
@@ -116,6 +117,10 @@ class Team:
                 rows.append(f"• {product} {tf}: {s['bias']} · {s['state']} · c={s['close']:.2f}")
         else:
             rows.append("• engines warming up…")
+        if self.nq is not None:
+            lv = self.nq.live
+            rows.append(f"• NQ 1m: {lv['bias']} · {lv['state']} · c={lv['close']:.2f}" if lv["close"] is not None
+                        else "• NQ 1m: warming up…")
         rows.append("")
         rows.append(self.risk.status_text())
         open_rows = self.ledger.open_rows()
